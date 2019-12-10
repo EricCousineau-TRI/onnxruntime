@@ -59,41 +59,40 @@ __global__ void _ScatterElementsKernel2D(
 //   }
 // }
 
-// template <typename T, typename Tin>
-// __global__ void _ScatterElementsKernel(
-//     const int rank,
-//     const T* input_data,
-//     const int64_t* input_dims,
-//     const int64_t* input_strides,
-//     const Tin* indices_data,
-//     const int64_t indices_size,
-//     const int64_t* indices_dims,
-//     const fast_divmod* indices_strides,
-//     const T* updates,
-//     const int axis,
-//     T* output_data) {
-//   CALCULATE_ELEMENTWISE_INDEX_OR_EXIT(indices_index, indices_size);
-//   int dim, remain = indices_index;
-//   size_t data_idx = 0;
-//   for (int i = 0; i < rank; ++i) {
-//     indices_strides[i].divmod(remain, dim, remain);
-//     if (i == axis) {
-//       dim = (int)(indices_data[indices_index]);
-//       if (dim < -input_dims[i] || dim >= input_dims[i]) {
-//         return;  // Invalid index
-//       }
-//       if (dim < 0) dim += input_dims[i];
-//     }
-//     data_idx += input_strides[i] * dim;
-//   }
-//   output_data[data_idx] = updates[indices_index];
-// }
+template <typename T, typename Tin>
+__global__ void _ScatterElementsKernel(
+    const int rank,
+    const T* input_data,
+    const int64_t* input_dims,
+    const int64_t* input_strides,
+    const Tin* indices_data,
+    const int64_t indices_size,
+    const int64_t* indices_dims,
+    const fast_divmod* indices_strides,
+    const T* updates,
+    const int axis,
+    T* output_data) {
+  CALCULATE_ELEMENTWISE_INDEX_OR_EXIT(indices_index, indices_size);
+  int dim, remain = indices_index;
+  size_t data_idx = 0;
+  for (int i = 0; i < rank; ++i) {
+    indices_strides[i].divmod(remain, dim, remain);
+    if (i == axis) {
+      dim = (int)(indices_data[indices_index]);
+      if (dim < -input_dims[i] || dim >= input_dims[i]) {
+        return;  // Invalid index
+      }
+      if (dim < 0) dim += input_dims[i];
+    }
+    data_idx += input_strides[i] * dim;
+  }
+  output_data[data_idx] = updates[indices_index];
+}
 
 static int CompactInputIndicesDims(
-    int rank, int64_t* input_dims, int64_t* indices_dims, 
-    std::vector<int64_t>& eff_input_dims;
-    std::vector<int64_t>& eff_indices_dims;
-) {
+    int rank, int axis, int64_t* input_dims, int64_t* indices_dims,
+    std::vector<int64_t>& eff_input_dims,
+    std::vector<int64_t>& eff_indices_dims) {
   eff_input_dims.clear();
   eff_indices_dims.clear();
 
@@ -106,8 +105,7 @@ static int CompactInputIndicesDims(
       if (input_dims[i] == indices_dims[i]) {
         eff_input_dims.back() *= input_dims[i];
         eff_indices_dims.back() *= indices_dims[i];
-      }
-      else {
+      } else {
         could_continue_merge = false;
         break;
       }
@@ -119,7 +117,7 @@ static int CompactInputIndicesDims(
     if (!could_continue_merge) {
       for (; i > axis; --i) {
         eff_input_dims.push_back(input_dims[i]);
-        eff_indices_dims.pushback(indices_dims[i]);
+        eff_indices_dims.push_back(indices_dims[i]);
       }
     }
   }
@@ -137,8 +135,7 @@ static int CompactInputIndicesDims(
       if (input_dims[i] == indices_dims[i]) {
         eff_input_dims.back() *= input_dims[i];
         eff_indices_dims.back() *= indices_dims[i];
-      }
-      else {
+      } else {
         could_continue_merge = false;
         break;
       }
@@ -150,13 +147,13 @@ static int CompactInputIndicesDims(
     if (!could_continue_merge) {
       for (; i >= 0 && could_continue_merge; --i) {
         eff_input_dims.push_back(input_dims[i]);
-        eff_indices_dims.pushback(indices_dims[i]);
+        eff_indices_dims.push_back(indices_dims[i]);
       }
     }
   }
-  new_axis = eff_input_dims - new_axis;
-  eff_input_dims.reverse();
-  eff_indices_dims.reverse();
+  new_axis = eff_input_dims.size() - new_axis;
+  std::reverse(eff_input_dims.begin(), eff_input_dims.end());
+  std::reverse(eff_indices_dims.begin(), eff_indices_dims.end());
   return new_axis;
 }
 
@@ -170,49 +167,50 @@ Status ScatterElementsImpl2D(
     const T* updates,
     const int axis,
     T* output_data) {
-
   int blocksPerGrid = (int)((indices_size + GridDim::maxThreadsPerBlock - 1) / GridDim::maxThreadsPerBlock);
   fast_divmod indices_stride_row(indices_dims[1]);
   if (axis == 0) {
     _ScatterElementsKernel2D<T, Tin, true><<<blocksPerGrid, GridDim::maxThreadsPerBlock, 0>>>(
-      gsl::narrow_cast<int>(input_dims[0]), input_data,
-      indices_data, indices_size, indices_stride_row,
-      updates, input_dims[1], output_data);
+        gsl::narrow_cast<int>(input_dims[0]), input_data,
+        indices_data, indices_size, indices_stride_row,
+        updates, input_dims[1], output_data);
   } else {
     _ScatterElementsKernel2D<T, Tin, false><<<blocksPerGrid, GridDim::maxThreadsPerBlock, 0>>>(
-      gsl::narrow_cast<int>(input_dims[0]), input_data,
-      indices_data, indices_size, indices_stride_row,
-      updates, input_dims[1], output_data);
+        gsl::narrow_cast<int>(input_dims[1]), input_data,
+        indices_data, indices_size, indices_stride_row,
+        updates, input_dims[1], output_data);
   }
   return Status::OK();
 }
 
+template <typename T, typename Tin>
 Status ScatterElementsImpl(
     const int rank,
     const T* input_data,
     const int64_t input_size,
-    CudaAsyncBuffer<int64_t>& buffer_input_dims,
-    CudaAsyncBuffer<int64_t>& buffer_input_strides,
+    CudaKernel::CudaAsyncBuffer<int64_t>& buffer_input_dims,
+    CudaKernel::CudaAsyncBuffer<int64_t>& buffer_input_strides,
     const Tin* indices_data,
     const int64_t indices_size,
-    CudaAsyncBuffer<int64_t>& buffer_indices_dims,
-    CudaAsyncBuffer<fast_divmod>& indices_strides,
+    CudaKernel::CudaAsyncBuffer<int64_t>& buffer_indices_dims,
+    CudaKernel::CudaAsyncBuffer<fast_divmod>& fdm_indices_strides,
     const T* updates,
     const int axis,
     T* output_data) {
-
   if (input_data != output_data) {
     CUDA_RETURN_IF_ERROR(cudaMemcpyAsync(output_data, input_data, input_size * sizeof(T), cudaMemcpyDeviceToDevice, 0));
   }
-    
+
   if (indices_size > 0) {
     std::vector<int64_t> eff_input_dims;
     std::vector<int64_t> eff_indices_dims;
-    int new_axis = CompactInputIndicesDims(rank, buffer_indices_dims.CpuPtr(), buffer_indices_dims.CpuPtr(), eff_input_dims, eff_indices_dims);
+    int new_axis = CompactInputIndicesDims(
+        rank, axis, buffer_input_dims.CpuPtr(), buffer_indices_dims.CpuPtr(), eff_input_dims, eff_indices_dims);
     if (eff_input_dims.size() == 2) {
-      return ScatterElementsImpl2D(input_data, eff_input_dims, indices_data, indices_size, eff_indices_dims,updates, new_axis, output_data);
+      return ScatterElementsImpl2D(
+          input_data, eff_input_dims, indices_data, indices_size, eff_indices_dims, updates, new_axis, output_data);
     }
-    
+
     ORT_RETURN_IF_ERROR(buffer_input_dims.CopyToGpu());
     ORT_RETURN_IF_ERROR(buffer_input_strides.CopyToGpu());
     ORT_RETURN_IF_ERROR(buffer_indices_dims.CopyToGpu());
@@ -226,33 +224,24 @@ Status ScatterElementsImpl(
   return Status::OK();
 }
 
-#define SPECIALIZED_IMPL(T)                           \
-  template void ScatterElementsImpl<T, int32_t>(      \
-      const int rank,                                 \
-      const T* input_data,                            \
-      const int64_t input_size,                       \
-      const int64_t* input_dims,                      \
-      const int64_t* input_strides,                   \
-      const int32_t* indices_data,                    \
-      const int64_t indices_size,                     \
-      const int64_t* indices_dims,                    \
-      const fast_divmod* indices_strides,             \
-      const T* updates,                               \
-      const int axis,                                 \
-      T* output_data);                                \
-  template void ScatterElementsImpl<T, int64_t>(      \
-      const int rank,                                 \
-      const T* input_data,                            \
-      const int64_t input_size,                       \
-      const int64_t* input_dims,                      \
-      const int64_t* input_strides,                   \
-      const int64_t* indices_data,                    \
-      const int64_t indices_size,                     \
-      const int64_t* indices_dims,                    \
-      const fast_divmod* indices_strides,             \
-      const T* updates,                               \
-      const int axis,                                 \
-      T* output_data);                                \
+#define SPECIALIZED_TINDEX_IMPL(T, TIndex)                        \
+  template Status ScatterElementsImpl<T, TIndex>(                 \
+      const int rank,                                             \
+      const T* input_data,                                        \
+      const int64_t input_size,                                   \
+      CudaKernel::CudaAsyncBuffer<int64_t>& buffer_input_dims,    \
+      CudaKernel::CudaAsyncBuffer<int64_t>& buffer_input_strides, \
+      const TIndex* indices_data,                                 \
+      const int64_t indices_size,                                 \
+      CudaKernel::CudaAsyncBuffer<int64_t>& buffer_indices_dims,  \
+      CudaKernel::CudaAsyncBuffer<fast_divmod>& indices_strides,  \
+      const T* updates,                                           \
+      const int axis,                                             \
+      T* output_data)
+
+#define SPECIALIZED_IMPL(T)            \
+  SPECIALIZED_TINDEX_IMPL(T, int32_t); \
+  SPECIALIZED_TINDEX_IMPL(T, int64_t);
 
 SPECIALIZED_IMPL(int8_t)
 SPECIALIZED_IMPL(int16_t)
