@@ -7,62 +7,223 @@
 namespace onnxruntime {
 namespace cuda {
 
-template <typename T, typename Tin>
-__global__ void _ScatterElementsKernel(
-    const int rank,
+template <typename T, typename Tin, bool OUTERAXIS>
+__global__ void _ScatterElementsKernel2D(
+    const int max_dim,  // max dim on the scattered axis
     const T* input_data,
-    const int64_t* input_dims,
-    const int64_t* input_strides,
     const Tin* indices_data,
     const int64_t indices_size,
-    const int64_t* indices_dims,
-    const fast_divmod* indices_strides,
+    const fast_divmod indices_stride_row,
     const T* updates,
-    const int axis,
+    const int64_t output_row_size,
     T* output_data) {
   CALCULATE_ELEMENTWISE_INDEX_OR_EXIT(indices_index, indices_size);
-  int dim, remain = indices_index;
-  size_t data_idx = 0;
-  for (int i = 0; i < rank; ++i) {
-    indices_strides[i].divmod(remain, dim, remain);
-    if (i == axis) {
-      dim = (int)(indices_data[indices_index]);
-      if (dim < -input_dims[i] || dim >= input_dims[i]) {
-        return; // Invalid index
-      }
-      if (dim < 0) dim += input_dims[i];
+
+  int row, col, data_idx;
+  indices_stride_row.divmod(indices_index, row, col);
+  int dim = (int)(indices_data[indices_index]);
+  if (dim >= -max_dim && dim < max_dim) {
+    if (dim < 0) dim += max_dim;
+    if (OUTERAXIS) {
+      data_idx = dim * output_row_size + col;
+    } else {
+      data_idx = row * output_row_size + dim;
     }
-    data_idx += input_strides[i] * dim;
+    output_data[data_idx] = updates[indices_index];
   }
-  output_data[data_idx] = updates[indices_index];
+  // else invalid index
+}
+
+// template <typename T, typename Tin>
+// __global__ void _ScatterElementsKernel3D(
+//     const int max_dim,  // max dim on the scattered axis
+//     const T* input_data,
+//     const Tin* indices_data,
+//     const int64_t indices_size,
+//     const fast_divmod indices_stride_image,
+//     const fast_divmod indices_stride_row,
+//     const T* updates,
+//     const int64_t output_image_size,
+//     const int64_t output_row_size,
+//     T* output_data) {
+//   CALCULATE_ELEMENTWISE_INDEX_OR_EXIT(indices_index, indices_size);
+
+//   int image, row, col, data_idx;
+//   indices_stride_image.divmod(indices_index, image, col);
+//   data_idx = image * output_image_size;
+//   indices_stride_row.divmod(col, row, col);
+//   int dim = (int)(indices_data[indices_index]);
+//   if (dim >= -max_dim && dim < max_dim) {
+//     data_idx = ((dim < 0) ? dim + max_dim : dim) * output_row_size + col;
+//     output_data[data_idx] = updates[indices_index];
+//   }
+// }
+
+// template <typename T, typename Tin>
+// __global__ void _ScatterElementsKernel(
+//     const int rank,
+//     const T* input_data,
+//     const int64_t* input_dims,
+//     const int64_t* input_strides,
+//     const Tin* indices_data,
+//     const int64_t indices_size,
+//     const int64_t* indices_dims,
+//     const fast_divmod* indices_strides,
+//     const T* updates,
+//     const int axis,
+//     T* output_data) {
+//   CALCULATE_ELEMENTWISE_INDEX_OR_EXIT(indices_index, indices_size);
+//   int dim, remain = indices_index;
+//   size_t data_idx = 0;
+//   for (int i = 0; i < rank; ++i) {
+//     indices_strides[i].divmod(remain, dim, remain);
+//     if (i == axis) {
+//       dim = (int)(indices_data[indices_index]);
+//       if (dim < -input_dims[i] || dim >= input_dims[i]) {
+//         return;  // Invalid index
+//       }
+//       if (dim < 0) dim += input_dims[i];
+//     }
+//     data_idx += input_strides[i] * dim;
+//   }
+//   output_data[data_idx] = updates[indices_index];
+// }
+
+static int CompactInputIndicesDims(
+    int rank, int64_t* input_dims, int64_t* indices_dims, 
+    std::vector<int64_t>& eff_input_dims;
+    std::vector<int64_t>& eff_indices_dims;
+) {
+  eff_input_dims.clear();
+  eff_indices_dims.clear();
+
+  bool could_continue_merge = true;
+  if (axis < rank - 1) {
+    eff_input_dims.push_back(1);
+    eff_indices_dims.push_back(1);
+    int i = rank - 1;
+    for (; i > axis; --i) {
+      if (input_dims[i] == indices_dims[i]) {
+        eff_input_dims.back() *= input_dims[i];
+        eff_indices_dims.back() *= indices_dims[i];
+      }
+      else {
+        could_continue_merge = false;
+        break;
+      }
+    }
+    if (eff_input_dims.back() == 1) {
+      eff_input_dims.pop_back();
+      eff_indices_dims.pop_back();
+    }
+    if (!could_continue_merge) {
+      for (; i > axis; --i) {
+        eff_input_dims.push_back(input_dims[i]);
+        eff_indices_dims.pushback(indices_dims[i]);
+      }
+    }
+  }
+  could_continue_merge = could_continue_merge && (input_dims[axis] == indices_dims[axis]);
+  eff_input_dims.push_back(input_dims[axis]);
+  eff_indices_dims.push_back(indices_dims[axis]);
+  int new_axis = (int)(eff_input_dims.size());
+  if (axis > 0) {
+    if (could_continue_merge) {
+      eff_input_dims.push_back(1);
+      eff_indices_dims.push_back(1);
+    }
+    int i = axis - 1;
+    for (; i >= 0 && could_continue_merge; --i) {
+      if (input_dims[i] == indices_dims[i]) {
+        eff_input_dims.back() *= input_dims[i];
+        eff_indices_dims.back() *= indices_dims[i];
+      }
+      else {
+        could_continue_merge = false;
+        break;
+      }
+    }
+    if (new_axis < (int)eff_indices_dims.size() && eff_input_dims.back() == 1) {
+      eff_input_dims.pop_back();
+      eff_indices_dims.pop_back();
+    }
+    if (!could_continue_merge) {
+      for (; i >= 0 && could_continue_merge; --i) {
+        eff_input_dims.push_back(input_dims[i]);
+        eff_indices_dims.pushback(indices_dims[i]);
+      }
+    }
+  }
+  new_axis = eff_input_dims - new_axis;
+  eff_input_dims.reverse();
+  eff_indices_dims.reverse();
+  return new_axis;
 }
 
 template <typename T, typename Tin>
-void ScatterElementsImpl(
+Status ScatterElementsImpl2D(
+    const T* input_data,
+    const std::vector<int64_t>& input_dims,
+    const Tin* indices_data,
+    const int64_t indices_size,
+    const std::vector<int64_t>& indices_dims,
+    const T* updates,
+    const int axis,
+    T* output_data) {
+
+  int blocksPerGrid = (int)((indices_size + GridDim::maxThreadsPerBlock - 1) / GridDim::maxThreadsPerBlock);
+  fast_divmod indices_stride_row(indices_dims[1]);
+  if (axis == 0) {
+    _ScatterElementsKernel2D<T, Tin, true><<<blocksPerGrid, GridDim::maxThreadsPerBlock, 0>>>(
+      gsl::narrow_cast<int>(input_dims[0]), input_data,
+      indices_data, indices_size, indices_stride_row,
+      updates, input_dims[1], output_data);
+  } else {
+    _ScatterElementsKernel2D<T, Tin, false><<<blocksPerGrid, GridDim::maxThreadsPerBlock, 0>>>(
+      gsl::narrow_cast<int>(input_dims[0]), input_data,
+      indices_data, indices_size, indices_stride_row,
+      updates, input_dims[1], output_data);
+  }
+  return Status::OK();
+}
+
+Status ScatterElementsImpl(
     const int rank,
     const T* input_data,
     const int64_t input_size,
-    const int64_t* input_dims,
-    const int64_t* input_strides,
+    CudaAsyncBuffer<int64_t>& buffer_input_dims,
+    CudaAsyncBuffer<int64_t>& buffer_input_strides,
     const Tin* indices_data,
     const int64_t indices_size,
-    const int64_t* indices_dims,
-    const fast_divmod* indices_strides,
+    CudaAsyncBuffer<int64_t>& buffer_indices_dims,
+    CudaAsyncBuffer<fast_divmod>& indices_strides,
     const T* updates,
     const int axis,
     T* output_data) {
 
   if (input_data != output_data) {
-    cudaMemcpyAsync(output_data, input_data, input_size * sizeof(T), cudaMemcpyDeviceToDevice, 0);
+    CUDA_RETURN_IF_ERROR(cudaMemcpyAsync(output_data, input_data, input_size * sizeof(T), cudaMemcpyDeviceToDevice, 0));
   }
-
+    
   if (indices_size > 0) {
+    std::vector<int64_t> eff_input_dims;
+    std::vector<int64_t> eff_indices_dims;
+    int new_axis = CompactInputIndicesDims(rank, buffer_indices_dims.CpuPtr(), buffer_indices_dims.CpuPtr(), eff_input_dims, eff_indices_dims);
+    if (eff_input_dims.size() == 2) {
+      return ScatterElementsImpl2D(input_data, eff_input_dims, indices_data, indices_size, eff_indices_dims,updates, new_axis, output_data);
+    }
+    
+    ORT_RETURN_IF_ERROR(buffer_input_dims.CopyToGpu());
+    ORT_RETURN_IF_ERROR(buffer_input_strides.CopyToGpu());
+    ORT_RETURN_IF_ERROR(buffer_indices_dims.CopyToGpu());
+    ORT_RETURN_IF_ERROR(fdm_indices_strides.CopyToGpu());
     int blocksPerGrid = (int)((indices_size + GridDim::maxThreadsPerBlock - 1) / GridDim::maxThreadsPerBlock);
     _ScatterElementsKernel<T, Tin><<<blocksPerGrid, GridDim::maxThreadsPerBlock, 0>>>(
-        rank, input_data, input_dims, input_strides,
-        indices_data, indices_size, indices_dims, indices_strides,
+        rank, input_data, buffer_input_dims.GpuPtr(), buffer_input_strides.GpuPtr(),
+        indices_data, indices_size, buffer_indices_dims.GpuPtr(), fdm_indices_strides.GpuPtr(),
         updates, axis, output_data);
   }
+  return Status::OK();
 }
 
 #define SPECIALIZED_IMPL(T)                           \
@@ -108,4 +269,3 @@ SPECIALIZED_IMPL(bool)
 
 }  // namespace cuda
 }  // namespace onnxruntime
-

@@ -45,11 +45,11 @@ ONNX_OPERATOR_KERNEL_EX(
           rank,                                                               \
           reinterpret_cast<const ToCudaType<T>::MappedType*>(input_data),     \
           input_data_size,                                                    \
-          gpu_input_dims.GpuPtr(),                                            \
-          gpu_input_strides.GpuPtr(),                                         \
+          buffer_input_dims.GpuPtr(),                                            \
+          buffer_input_strides.GpuPtr(),                                         \
           indices_data,                                                       \
           indices_size,                                                       \
-          gpu_indices_dims.GpuPtr(),                                          \
+          buffer_indices_dims.GpuPtr(),                                          \
           fdm_indices_strides.GpuPtr(),                                       \
           reinterpret_cast<const ToCudaType<T>::MappedType*>(update_data),    \
           axis,                                                               \
@@ -62,11 +62,11 @@ ONNX_OPERATOR_KERNEL_EX(
           rank,                                                               \
           reinterpret_cast<const ToCudaType<T>::MappedType*>(input_data),     \
           input_data_size,                                                    \
-          gpu_input_dims.GpuPtr(),                                            \
-          gpu_input_strides.GpuPtr(),                                         \
+          buffer_input_dims.GpuPtr(),                                            \
+          buffer_input_strides.GpuPtr(),                                         \
           indices_data,                                                       \
           indices_size,                                                       \
-          gpu_indices_dims.GpuPtr(),                                          \
+          buffer_indices_dims.GpuPtr(),                                          \
           fdm_indices_strides.GpuPtr(),                                       \
           reinterpret_cast<const ToCudaType<T>::MappedType*>(update_data),    \
           axis,                                                               \
@@ -122,17 +122,17 @@ Status ScatterElements::ComputeInternal(OpKernelContext* context) const {
   int rank = (int)input_dims.size();
   auto* output_tensor = context->Output(0, input_data_shape);
 
-  CudaAsyncBuffer<int64_t> gpu_input_dims(this, input_dims);
+  CudaAsyncBuffer<int64_t> buffer_input_dims(this, input_dims);
   TensorPitches input_strides(input_dims);
-  CudaAsyncBuffer<int64_t> gpu_input_strides(this, input_strides);
+  CudaAsyncBuffer<int64_t> buffer_input_strides(this, input_strides);
 
-  CudaAsyncBuffer<int64_t> gpu_indices_dims(this, indices_dims);
+  CudaAsyncBuffer<int64_t> buffer_indices_dims(this, indices_dims);
   CudaAsyncBuffer<fast_divmod> fdm_indices_strides(this, rank);
   ORT_ENFORCE(CalculateFdmStrides(fdm_indices_strides.CpuSpan(), indices_dims));
 
-  ORT_RETURN_IF_ERROR(gpu_input_dims.CopyToGpu());
-  ORT_RETURN_IF_ERROR(gpu_input_strides.CopyToGpu());
-  ORT_RETURN_IF_ERROR(gpu_indices_dims.CopyToGpu());
+  ORT_RETURN_IF_ERROR(buffer_input_dims.CopyToGpu());
+  ORT_RETURN_IF_ERROR(buffer_input_strides.CopyToGpu());
+  ORT_RETURN_IF_ERROR(buffer_indices_dims.CopyToGpu());
   ORT_RETURN_IF_ERROR(fdm_indices_strides.CopyToGpu());
 
   MLDataType Tin_type = indices_tensor->DataType();
